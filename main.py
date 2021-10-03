@@ -5,6 +5,7 @@ import time
 import numpy as np
 import torch
 from torch import nn
+from torch import optim
 
 import Corpus as c
 from model import make_transformer, make_mos_transformer
@@ -12,7 +13,7 @@ from model import make_transformer, make_mos_transformer
 parser = argparse.ArgumentParser(description='Transformer-MOS')
 parser.add_argument('--data', type=str, default='./data/wikitext-103', help='location of corpus')
 parser.add_argument('--mos', default=True, action='store_true', help='use mixture of softmax decoder')
-parser.add_argument('--mixtures', type=int, default=5, help='num mixtures of softmax')
+parser.add_argument('--mixtures', type=int, default=10, help='num mixtures of softmax')
 parser.add_argument('--dmodel', type=int, default=300, help='dimension of model')
 parser.add_argument('--layers', type=int, default=4, help='number of transformer encoder layers')
 parser.add_argument('--ffhidden', type=int, default=300, help='number of feed forward hidden units')
@@ -20,7 +21,7 @@ parser.add_argument('--dropout', type=float, default=.35, help='dropout rate')
 parser.add_argument('--nhead', type=int, default=4, help='number of attention heads')
 parser.add_argument('--seed', type=int, default=26, help='seed')
 parser.add_argument('--cuda', default=True, action='store_true', help='cuda')
-parser.add_argument('--batch_size', type=int, default=36, help='training batch size')
+parser.add_argument('--batch_size', type=int, default=128, help='training batch size')
 parser.add_argument('--bptt', type=int, default=35, help='sequence length')
 parser.add_argument('--lr', type=float, default=7, help='learning rate')
 parser.add_argument('--epochs', type=int, default=50, help='num epochs')
@@ -36,6 +37,8 @@ MODEL_SAVE_DIR = './model'
 model = None
 ntokens = 0
 criterion = nn.NLLLoss()
+opt = None
+device = None
 
 
 def batchify(data, bsz):
@@ -49,8 +52,7 @@ def get_batch(source, i):
     seq_len = min(args.bptt, len(source) - 1 - i)
     data = source[i:i + seq_len]
     target = source[i + 1:i + 1 + seq_len].view(-1)
-    return data, target
-
+    return data.to(device), target.to(device)
 
 def train_epoch(train_data, epoch, args, lr):
     model.train()
@@ -61,14 +63,15 @@ def train_epoch(train_data, epoch, args, lr):
         data, targets = get_batch(train_data, i)
         if data.size(0) != args.bptt:
             src_mask = model.generate_mask(data.size(0)).to(device)
-        model.zero_grad()
+
+        opt.zero_grad()
         output = model(data, src_mask)
         output = output.view(-1, ntokens)
         loss = criterion(output, targets)
+
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), args.clip)
-        for p in model.parameters():
-            p.data.add_(p.grad, alpha=-lr)
+        opt.step()
 
         total_loss += loss.item()
 
@@ -100,6 +103,8 @@ def train(train_data, val_data, args):
             torch.save(model.encoder.state_dict(), PATH)
         else:
             lr = lr / 1.75
+            for g in opt.param_groups:
+                g['lr'] = lr
         epoch += 1
 
 
@@ -155,6 +160,8 @@ if __name__ == '__main__':
 
     LR = args.lr
 
+    opt = optim.SGD(model.parameters(), lr=LR)
+
     try:
         print('-' * 100)
         print("Starting training...")
@@ -168,7 +175,3 @@ if __name__ == '__main__':
     print('|test loss {:5.2f} | test ppl {:8.2f}'.format(
         test_loss, math.exp(test_loss)))
     print('=' * 100)
-
-'''
-total number of params: 214,226,424
-'''
