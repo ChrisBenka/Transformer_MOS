@@ -13,7 +13,7 @@ import Corpus as c
 from model import make_transformer, make_mos_transformer
 
 parser = argparse.ArgumentParser(description='Transformer-MOS')
-parser.add_argument('--data', type=str, default='./data/wikitext-103', help='location of corpus')
+parser.add_argument('--data', type=str, default='./data/penntreebank', help='location of corpus')
 parser.add_argument('--mos', default=True, action='store_true', help='use mixture of softmax decoder')
 parser.add_argument('--mixtures', type=int, default=10, help='num mixtures of softmax')
 parser.add_argument('--dmodel', type=int, default=300, help='dimension of model')
@@ -22,7 +22,7 @@ parser.add_argument('--ffhidden', type=int, default=300, help='number of feed fo
 parser.add_argument('--dropout', type=float, default=.35, help='dropout rate')
 parser.add_argument('--nhead', type=int, default=4, help='number of attention heads')
 parser.add_argument('--seed', type=int, default=26, help='seed')
-parser.add_argument('--cuda', default=True, action='store_true', help='cuda')
+parser.add_argument('--cuda', default=False, action='store_true', help='cuda')
 parser.add_argument('--batch_size', type=int, default=128, help='training batch size')
 parser.add_argument('--bptt', type=int, default=35, help='sequence length')
 parser.add_argument('--lr', type=float, default=7, help='learning rate')
@@ -57,12 +57,14 @@ def get_batch(source, i):
     target = source[i + 1:i + 1 + seq_len].view(-1)
     return data.to(device), target.to(device)
 
+
+
 def train_epoch(train_dataloader, epoch, args, lr):
     model.train()
     total_loss = 0.
     start_time = time.time()
     src_mask = model.generate_mask(args.bptt).to(device)
-    for batch in train_dataloader:
+    for batch in enumerate(train_dataloader):
         inputs, targets = batch
         inputs = inputs.to(device)
         targets = targets.to(device)
@@ -86,6 +88,7 @@ def train_epoch(train_dataloader, epoch, args, lr):
                               elapsed * 1000 / args.log_interval, cur_loss, math.exp(cur_loss)))
             total_loss = 0
             start_time = time.time()
+
 
 def train(train_data, val_data, args):
     best_val_loss = float("inf")
@@ -114,14 +117,16 @@ def evaluate(data_source, args):
     total_loss = 0.0
     src_mask = model.generate_mask(args.bptt).to(device)
     with torch.no_grad():
-        for i in range(0, data_source.size(0) - 1, args.bptt):
-            data, targets = get_batch(data_source, i)
-            if data.size(0) != args.bptt:
-                src_mask = model.generate_mask(data.size(0)).to(device)
-            output = model(data, src_mask)
-            output = output.view(-1, ntokens)
-            total_loss += len(data) * criterion(output, targets).item()
-    return total_loss / (len(data_source) - 1)
+        for batch in data_source:
+            inputs, targets = batch
+            inputs = inputs.to(device)
+            targets = targets.to(device)
+            if batch.size(0) != args.bptt:
+                src_mask = model.generate_mask(batch.size(0)).to(device)
+            output = model(inputs, src_mask)
+            output = output.view(-1,ntokens)
+            total_loss += len(inputs) * criterion(output,targets).item()
+        return total_loss / (len(data_source) - 1)
 
 
 if __name__ == '__main__':
@@ -144,7 +149,7 @@ if __name__ == '__main__':
     test_data = batchify(corpus.test, EVAL_BATCH_SIZE)
 
     train_dataloader = DataLoader(train_data,batch_size=args.batch_size,collate_fn=get_batch)
-    val_dataloader = DataLoader(val_data,batch_size=args.batch_size,collate_fn=get_batch)
+    val_dataloader = DataLoader(val_data,batch_size=EVAL_BATCH_SIZE,collate_fn=get_batch)
     eval_dataloader = DataLoader(test_data,batch_size=EVAL_BATCH_SIZE,collate_fn=get_batch)
 
     make = make_mos_transformer if args.mos else make_transformer
