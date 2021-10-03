@@ -6,6 +6,8 @@ import numpy as np
 import torch
 from torch import nn
 from torch import optim
+from torch.utils.data import DataLoader
+from accelerate import Accelerator
 
 import Corpus as c
 from model import make_transformer, make_mos_transformer
@@ -38,8 +40,9 @@ model = None
 ntokens = 0
 criterion = nn.NLLLoss()
 opt = None
-device = None
 
+accelerator = Accelerator()
+device = accelerator.device
 
 def batchify(data, bsz):
     nbatch = data.size(0) // bsz
@@ -54,25 +57,24 @@ def get_batch(source, i):
     target = source[i + 1:i + 1 + seq_len].view(-1)
     return data.to(device), target.to(device)
 
-def train_epoch(train_data, epoch, args, lr):
+def train_epoch(train_dataloader, epoch, args, lr):
     model.train()
     total_loss = 0.
     start_time = time.time()
     src_mask = model.generate_mask(args.bptt).to(device)
-    for batch, i in enumerate(range(0, train_data.size(0) - 1, args.bptt)):
-        data, targets = get_batch(train_data, i)
-        if data.size(0) != args.bptt:
-            src_mask = model.generate_mask(data.size(0)).to(device)
-
+    for batch in train_dataloader:
+        inputs, targets = batch
+        inputs = inputs.to(device)
+        targets = targets.to(device)
+        if batch.size(0) != args.bptt:
+            src_mask = model.generate_mask(batch.size(0)).to(device)
         opt.zero_grad()
-        output = model(data, src_mask)
-        output = output.view(-1, ntokens)
-        loss = criterion(output, targets)
-
-        loss.backward()
+        output = model(inputs,src_mask)
+        output = output.view(-1,ntokens)
+        loss = criterion(output,targets)
+        accelerator.backward(loss)
         torch.nn.utils.clip_grad_norm_(model.parameters(), args.clip)
         opt.step()
-
         total_loss += loss.item()
 
         if batch % args.log_interval == 0 and batch > 0:
@@ -84,7 +86,6 @@ def train_epoch(train_data, epoch, args, lr):
                               elapsed * 1000 / args.log_interval, cur_loss, math.exp(cur_loss)))
             total_loss = 0
             start_time = time.time()
-
 
 def train(train_data, val_data, args):
     best_val_loss = float("inf")
@@ -142,6 +143,10 @@ if __name__ == '__main__':
     val_data = batchify(corpus.valid, EVAL_BATCH_SIZE)
     test_data = batchify(corpus.test, EVAL_BATCH_SIZE)
 
+    train_dataloader = DataLoader(train_data,batch_size=args.batch_size,collate_fn=get_batch)
+    val_dataloader = DataLoader(val_data,batch_size=args.batch_size,collate_fn=get_batch)
+    eval_dataloader = DataLoader(test_data,batch_size=EVAL_BATCH_SIZE,collate_fn=get_batch)
+
     make = make_mos_transformer if args.mos else make_transformer
     if args.mos:
         model = make_mos_transformer(n_experts=args.mixtures, n_tokens=ntokens, dim_model=args.dmodel,
@@ -162,15 +167,18 @@ if __name__ == '__main__':
 
     opt = optim.SGD(model.parameters(), lr=LR)
 
+    train_dataloader, val_dataloader, eval_dataloader, model, opt \
+        =  accelerator.prepare(train_dataloader, eval_dataloader, model, opt)
+
     try:
         print('-' * 100)
         print("Starting training...")
-        train(train_data, val_data, args)
+        train(train_dataloader, val_dataloader, args)
     except KeyboardInterrupt:
         print('-' * 100)
         print('Exiting from training...')
 
-    test_loss = evaluate(test_data, args)
+    test_loss = evaluate(eval_dataloader, args)
     print('=' * 100)
     print('|test loss {:5.2f} | test ppl {:8.2f}'.format(
         test_loss, math.exp(test_loss)))
